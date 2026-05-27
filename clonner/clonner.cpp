@@ -221,7 +221,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
                     if (g_watchFolder.empty() || g_destFolder.empty())
                     {
-                        MessageBoxW(hWnd, L"監視フォルダとコピー先フォルダを指定してください。",
+                        MessageBoxW(hWnd, L"Please specify both the watch folder and the destination folder.",
                                     L"clonner", MB_OK | MB_ICONWARNING);
                         break;
                     }
@@ -236,14 +236,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_W), FALSE);
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_D), FALSE);
                         WCHAR info[256];
-                        wsprintfW(info, L"監視を開始しました (間隔 %u 秒): ", (g_intervalMs / 1000));
+                        wsprintfW(info, L"Watching started (interval %u s): ", (g_intervalMs / 1000));
                         AppendLog(std::wstring(info) + g_watchFolder +
                                   L"  ->  " + g_destFolder +
                                   L"  (" + g_targetExt + L")");
                     }
                     else
                     {
-                        MessageBoxW(hWnd, L"監視を開始できませんでした。フォルダのパスを確認してください。",
+                        MessageBoxW(hWnd, L"Failed to start watching. Please check the folder paths.",
                                     L"clonner", MB_OK | MB_ICONERROR);
                     }
                 }
@@ -258,7 +258,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 EnableWindow(GetDlgItem(hWnd, IDC_EDIT_INTERVAL), TRUE);
                 EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_W), TRUE);
                 EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_D), TRUE);
-                AppendLog(L"監視を停止しました。");
+                AppendLog(L"Watching stopped.");
                 break;
             default:
                 return DefWindowProc(hWnd, message, wParam, lParam);
@@ -418,7 +418,7 @@ static void CopyOneFile(const std::wstring& relativeName)
     {
         if (CopyFileW(src.c_str(), dst.c_str(), FALSE))
         {
-            AppendLog(L"コピー: " + relativeName);
+            AppendLog(L"Copied: " + relativeName);
             return;
         }
         DWORD err = GetLastError();
@@ -428,7 +428,7 @@ static void CopyOneFile(const std::wstring& relativeName)
         }
         Sleep(500);
     }
-    AppendLog(L"コピー失敗: " + relativeName);
+    AppendLog(L"Copy failed: " + relativeName);
 }
 
 //
@@ -528,29 +528,29 @@ static void CreateChildControls(HWND hWnd)
 {
     HINSTANCE hi = (HINSTANCE)GetWindowLongPtrW(hWnd, GWLP_HINSTANCE);
 
-    CreateWindowW(L"STATIC", L"監視フォルダ:", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Watch folder:", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_watchFolder.c_str(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_WATCH, hi, nullptr);
-    CreateWindowW(L"BUTTON", L"参照...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+    CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_BROWSE_W, hi, nullptr);
 
-    CreateWindowW(L"STATIC", L"コピー先フォルダ:", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Destination folder:", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_destFolder.c_str(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_DEST, hi, nullptr);
-    CreateWindowW(L"BUTTON", L"参照...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+    CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_BROWSE_D, hi, nullptr);
 
-    CreateWindowW(L"STATIC", L"対象拡張子:", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Extension:", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_targetExt.c_str(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_EXT, hi, nullptr);
 
-    CreateWindowW(L"STATIC", L"監視間隔(秒):", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Interval (sec):", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     {
         WCHAR initInterval[16];
@@ -560,9 +560,9 @@ static void CreateChildControls(HWND hWnd)
                         0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_INTERVAL, hi, nullptr);
     }
 
-    CreateWindowW(L"BUTTON", L"開始", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+    CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_START, hi, nullptr);
-    HWND hStop = CreateWindowW(L"BUTTON", L"停止", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+    HWND hStop = CreateWindowW(L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_STOP, hi, nullptr);
     EnableWindow(hStop, FALSE);
 
@@ -632,19 +632,19 @@ static void LayoutChildControls(HWND hWnd)
     };
 
     // 監視フォルダ
-    placeLabel(L"監視フォルダ:", pad, y + 3, labelW, rowH);
+    placeLabel(L"Watch folder:", pad, y + 3, labelW, rowH);
     place(IDC_EDIT_WATCH, pad + labelW, y, W - pad*3 - labelW - btnW, editH);
     place(IDC_BTN_BROWSE_W, W - pad - btnW, y, btnW, editH);
     y += rowH + pad / 2;
 
     // コピー先フォルダ
-    placeLabel(L"コピー先フォルダ:", pad, y + 3, labelW, rowH);
+    placeLabel(L"Destination folder:", pad, y + 3, labelW, rowH);
     place(IDC_EDIT_DEST, pad + labelW, y, W - pad*3 - labelW - btnW, editH);
     place(IDC_BTN_BROWSE_D, W - pad - btnW, y, btnW, editH);
     y += rowH + pad / 2;
 
     // 対象拡張子
-    placeLabel(L"対象拡張子:", pad, y + 3, labelW, rowH);
+    placeLabel(L"Extension:", pad, y + 3, labelW, rowH);
     place(IDC_EDIT_EXT, pad + labelW, y, 120, editH);
 
     // 監視間隔（秒） … 同じ行の右側
@@ -652,7 +652,7 @@ static void LayoutChildControls(HWND hWnd)
         const int intLabelW = 90;
         const int intEditW  = 70;
         int x = pad + labelW + 120 + pad * 2;
-        placeLabel(L"監視間隔(秒):", x, y + 3, intLabelW, rowH);
+        placeLabel(L"Interval (sec):", x, y + 3, intLabelW, rowH);
         place(IDC_EDIT_INTERVAL, x + intLabelW, y, intEditW, editH);
     }
     y += rowH + pad / 2;
@@ -695,7 +695,7 @@ static bool BrowseForFolder(HWND hOwner, std::wstring& outPath)
     BROWSEINFOW bi = {};
     bi.hwndOwner      = hOwner;
     bi.pszDisplayName = display;
-    bi.lpszTitle      = L"フォルダを選択してください";
+    bi.lpszTitle      = L"Select a folder";
     bi.ulFlags        = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     bi.lpfn           = BFFCallback;
     bi.lParam         = initial.empty() ? 0 : (LPARAM)initial.c_str();
