@@ -11,7 +11,7 @@ A lightweight Windows folder watcher that automatically copies newly added files
 - Configurable from the GUI:
   - Watch folder (local or UNC)
   - Destination folder (local or UNC)
-  - Target extension (e.g. `.txt`, `.log`)
+  - Target extension(s) — one or more, e.g. `*.txt` or `*.pdf,*.xlsx` (comma / semicolon / space separated; the leading `*` and `.` are optional)
   - Maximum polling interval (seconds, 1–3600) — the actual wait between scans is randomized in the range `[1 s, max]`
 - Simple log panel showing copy results
 - Browse buttons for picking folders via the standard Windows shell dialog
@@ -39,7 +39,7 @@ The resulting binary is `clonner\x64\Release\clonner.exe`.
 1. Launch `clonner.exe`.
 2. Set **Watch folder** — the folder to monitor.
 3. Set **Destination folder** — where matching files will be copied.
-4. Set **Extension** — for example `.txt` (the leading dot is optional).
+4. Set **Extensions** — one or more extensions to watch for. Examples: `*.txt`, `*.pdf,*.xlsx`, `pdf;xlsx`, `log doc`. The leading `*` and `.` are optional.
 5. Set **Max interval (sec)** — the upper bound of the polling interval. Each scan waits a random number of milliseconds between 1 s and this value.
 6. Click **Start**. The log panel will show copies as they happen.
 7. Click **Stop** to end monitoring.

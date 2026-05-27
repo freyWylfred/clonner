@@ -37,7 +37,8 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // メイン ウィンドウ ク
 // 監視設定（UI から書き換えられる）
 static std::wstring g_watchFolder = L"C:\\WatchSource";
 static std::wstring g_destFolder  = L"C:\\WatchDest";
-static std::wstring g_targetExt   = L".txt";
+static std::wstring g_targetExt   = L"*.txt"; // 複数指定可（カンマ / セミコロン / 空白区切り、例: "*.pdf,*.xlsx"）
+static std::vector<std::wstring> g_targetExtList; // 正規化済み拡張子一覧（「.pdf」の形式、小文字とは限らない）
 // 監視間隔はランダム化（毎回 [g_intervalMinMs, g_intervalMaxMs] の範囲）
 static DWORD        g_intervalMinMs = 1000; // 下限 1 秒（固定）
 static DWORD        g_intervalMaxMs = 2000; // 上限（UI から書き換えられる）
@@ -209,11 +210,40 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     g_watchFolder = buf;
                     GetDlgItemTextW(hWnd, IDC_EDIT_DEST, buf, MAX_PATH);
                     g_destFolder = buf;
-                    WCHAR ext[64] = {};
-                    GetDlgItemTextW(hWnd, IDC_EDIT_EXT, ext, 64);
+                    WCHAR ext[256] = {};
+                    GetDlgItemTextW(hWnd, IDC_EDIT_EXT, ext, 256);
                     g_targetExt = ext;
-                    if (!g_targetExt.empty() && g_targetExt[0] != L'.')
-                        g_targetExt = L"." + g_targetExt;
+                    // "*.pdf,*.xlsx" / ".pdf;xlsx" / "pdf xlsx" などをパースして「.xxx」形式の一覧にする
+                    g_targetExtList.clear();
+                    {
+                        std::wstring token;
+                        auto flush = [&]() {
+                            // 前後の空白と '*' を除去
+                            size_t b = 0, e = token.size();
+                            while (b < e && (token[b] == L' ' || token[b] == L'\t' || token[b] == L'*')) ++b;
+                            while (e > b && (token[e-1] == L' ' || token[e-1] == L'\t')) --e;
+                            std::wstring t = token.substr(b, e - b);
+                            if (!t.empty())
+                            {
+                                if (t[0] != L'.') t = L"." + t;
+                                if (t.size() > 1) g_targetExtList.push_back(t);
+                            }
+                            token.clear();
+                        };
+                        for (wchar_t ch : g_targetExt)
+                        {
+                            if (ch == L',' || ch == L';' || ch == L'|' || ch == L' ' || ch == L'\t')
+                                flush();
+                            else
+                                token.push_back(ch);
+                        }
+                        flush();
+                    }
+                    if (g_targetExtList.empty())
+                    {
+                        // フォールバック：入力が空だったら .txt を使う
+                        g_targetExtList.push_back(L".txt");
+                    }
 
                     // 監視間隔（秒・最大値）取得
                     BOOL trans = FALSE;
@@ -243,9 +273,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         WCHAR info[256];
                         wsprintfW(info, L"Watching started (random interval %u-%u s): ",
                                   (g_intervalMinMs / 1000), (g_intervalMaxMs / 1000));
+                        // 拡張子一覧をカンマ区切りで表示
+                        std::wstring extJoined;
+                        for (size_t i = 0; i < g_targetExtList.size(); ++i)
+                        {
+                            if (i) extJoined += L", ";
+                            extJoined += L"*";
+                            extJoined += g_targetExtList[i];
+                        }
                         AppendLog(std::wstring(info) + g_watchFolder +
                                   L"  ->  " + g_destFolder +
-                                  L"  (" + g_targetExt + L")");
+                                  L"  (" + extJoined + L")");
                     }
                     else
                     {
@@ -386,13 +424,17 @@ static void StopWatching()
 }
 
 //
-// 拡張子の一致判定（大文字小文字を区別しない）
+// 拡張子の一致判定（大文字小文字を区別しない、複数拡張子対応）
 //
 static bool HasTargetExtension(const std::wstring& fileName)
 {
     const wchar_t* ext = ::PathFindExtensionW(fileName.c_str());
     if (!ext || !*ext) return false;
-    return _wcsicmp(ext, g_targetExt.c_str()) == 0;
+    for (const auto& e : g_targetExtList)
+    {
+        if (_wcsicmp(ext, e.c_str()) == 0) return true;
+    }
+    return false;
 }
 
 //
@@ -563,7 +605,7 @@ static void CreateChildControls(HWND hWnd)
     CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_BTN_BROWSE_D, hi, nullptr);
 
-    CreateWindowW(L"STATIC", L"Extension:", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Extensions:", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_targetExt.c_str(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -662,15 +704,15 @@ static void LayoutChildControls(HWND hWnd)
     place(IDC_BTN_BROWSE_D, W - pad - btnW, y, btnW, editH);
     y += rowH + pad / 2;
 
-    // 対象拡張子
-    placeLabel(L"Extension:", pad, y + 3, labelW, rowH);
-    place(IDC_EDIT_EXT, pad + labelW, y, 120, editH);
+    // 対象拡張子（複数可）
+    placeLabel(L"Extensions:", pad, y + 3, labelW, rowH);
+    place(IDC_EDIT_EXT, pad + labelW, y, 220, editH);
 
     // 監視間隔（秒・最大値） … 同じ行の右側。実際の待機は 1 秒〜この値の乱数。
     {
         const int intLabelW = 120;
         const int intEditW  = 70;
-        int x = pad + labelW + 120 + pad * 2;
+        int x = pad + labelW + 220 + pad * 2;
         placeLabel(L"Max interval (sec):", x, y + 3, intLabelW, rowH);
         place(IDC_EDIT_INTERVAL, x + intLabelW, y, intEditW, editH);
     }
