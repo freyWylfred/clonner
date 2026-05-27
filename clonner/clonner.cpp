@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include <algorithm>
 #include <random>
 #pragma comment(lib, "Shlwapi.lib")
@@ -438,9 +439,9 @@ static bool HasTargetExtension(const std::wstring& fileName)
 }
 
 //
-// 1ファイルをコピー先へコピー（リトライ付き）
+// 1ファイルをコピー先へコピー（リトライ付き。成功したら true）
 //
-static void CopyOneFile(const std::wstring& relativeName)
+static bool CopyOneFile(const std::wstring& relativeName)
 {
     std::wstring src = g_watchFolder;
     if (!src.empty() && src.back() != L'\\') src += L'\\';
@@ -464,22 +465,23 @@ static void CopyOneFile(const std::wstring& relativeName)
         }
     }
 
-    // ファイルが書き込み中の場合に備えてリトライ
+    // コピー中の一時的な共有失敗に備えてリトライ
     for (int i = 0; i < 5; ++i)
     {
         if (CopyFileW(src.c_str(), dst.c_str(), FALSE))
         {
             AppendLog(L"Copied: " + relativeName);
-            return;
+            return true;
         }
         DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
         {
-            return; // 既に消えている
+            return false; // 既に消えている
         }
         Sleep(500);
     }
-    AppendLog(L"Copy failed: " + relativeName);
+    AppendLog(L"Copy failed (will retry next scan): " + relativeName);
+    return false;
 }
 
 //
@@ -493,9 +495,16 @@ struct CIStringLess
     }
 };
 
+// ファイルのメタデータ（「安定したか」を判定するために使う）
+struct FileMeta
+{
+    LONGLONG size = -1;
+    FILETIME mtime = {};
+};
+
 static void EnumerateTargetFiles(const std::wstring& dir,
                                  const std::wstring& relBase,
-                                 std::set<std::wstring, CIStringLess>& out)
+                                 std::map<std::wstring, FileMeta, CIStringLess>& out)
 {
     std::wstring pattern = dir;
     if (!pattern.empty() && pattern.back() != L'\\') pattern += L'\\';
@@ -525,7 +534,12 @@ static void EnumerateTargetFiles(const std::wstring& dir,
         else
         {
             if (HasTargetExtension(fd.cFileName))
-                out.insert(rel);
+            {
+                FileMeta m;
+                m.size = (static_cast<LONGLONG>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+                m.mtime = fd.ftLastWriteTime;
+                out[rel] = m;
+            }
         }
     } while (FindNextFileW(h, &fd));
 
@@ -534,11 +548,16 @@ static void EnumerateTargetFiles(const std::wstring& dir,
 
 static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
 {
-    std::set<std::wstring, CIStringLess> known;
+    using MetaMap = std::map<std::wstring, FileMeta, CIStringLess>;
 
-    // 起動直後はその時点のファイル一覧を「既知」として記録するだけ
-    // （以降に「増えた」ファイルだけをコピー対象とする）
-    EnumerateTargetFiles(g_watchFolder, L"", known);
+    // 前回スキャン時のメタデータと、すでにコピー済みの一覧
+    MetaMap previous;
+    std::set<std::wstring, CIStringLess> copied;
+
+    // 起動直後に存在していたファイルは「コピー済み」扱いとし、
+    // 以降に「増えた」ファイルだけをコピー対象とする
+    EnumerateTargetFiles(g_watchFolder, L"", previous);
+    for (const auto& kv : previous) copied.insert(kv.first);
 
     // ランダム間隔用の乱数生成器
     std::mt19937 rng(static_cast<unsigned>(GetTickCount64()) ^ GetCurrentThreadId());
@@ -556,7 +575,6 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
         DWORD wait = WaitForSingleObject(g_hStopEvent, waitMs);
         if (wait == WAIT_OBJECT_0)
         {
-            // 停止要求
             break;
         }
         if (wait != WAIT_TIMEOUT)
@@ -564,19 +582,49 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
             break;
         }
 
-        std::set<std::wstring, CIStringLess> current;
+        MetaMap current;
         EnumerateTargetFiles(g_watchFolder, L"", current);
 
-        // 新規ファイル（current にあって known に無いもの）をコピー
-        for (const auto& name : current)
+        // 未コピーのファイルについてのみ処理。
+        // 「前回とサイズ+更新時刻が同じ」ときだけ「書き込みが落ち着いた」と見なしコピーする。
+        // （アップロード中に検出されたファイルは、次のスキャンで同一メタデータになってからコピーされる）
+        for (const auto& kv : current)
         {
-            if (known.find(name) == known.end())
+            const std::wstring& name = kv.first;
+            const FileMeta& cur = kv.second;
+            if (copied.find(name) != copied.end()) continue;
+
+            auto it = previous.find(name);
+            bool stable = false;
+            if (it != previous.end())
             {
-                CopyOneFile(name);
+                const FileMeta& prev = it->second;
+                stable = (prev.size == cur.size) &&
+                         (CompareFileTime(&prev.mtime, &cur.mtime) == 0) &&
+                         (cur.size >= 0);
+            }
+
+            if (stable)
+            {
+                if (CopyOneFile(name))
+                {
+                    copied.insert(name);
+                }
+                // 失敗した場合は copied に入れないので、次回以降も再試行される
             }
         }
 
-        known.swap(current);
+        // 監視元から消えたファイルは「コピー済み」からも除く
+        // （同名ファイルが再びアップロードされたときにコピーされるようにする）
+        for (auto it = copied.begin(); it != copied.end(); )
+        {
+            if (current.find(*it) == current.end())
+                it = copied.erase(it);
+            else
+                ++it;
+        }
+
+        previous = std::move(current);
     }
 
     return 0;
