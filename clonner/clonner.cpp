@@ -470,13 +470,37 @@ static bool CopyOneFile(const std::wstring& relativeName)
     {
         if (CopyFileW(src.c_str(), dst.c_str(), FALSE))
         {
-            AppendLog(L"Copied: " + relativeName);
+            // コピーしたファイルのサイズを取得してログに表示
+            WIN32_FILE_ATTRIBUTE_DATA fad = {};
+            std::wstring sizeStr = L"";
+            if (GetFileAttributesExW(dst.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+                WCHAR buf[64];
+                if (sz >= (1ULL << 30))
+                    swprintf_s(buf, L" (%.2f GB)", (double)sz / (double)(1ULL << 30));
+                else if (sz >= (1ULL << 20))
+                    swprintf_s(buf, L" (%.2f MB)", (double)sz / (double)(1ULL << 20));
+                else if (sz >= (1ULL << 10))
+                    swprintf_s(buf, L" (%.2f KB)", (double)sz / (double)(1ULL << 10));
+                else
+                    swprintf_s(buf, L" (%llu B)", sz);
+                sizeStr = buf;
+            }
+            AppendLog(L"Copied: " + relativeName + sizeStr + L"  ->  " + dst);
             return true;
         }
         DWORD err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
         {
+            AppendLog(L"Skipped (source disappeared): " + relativeName);
             return false; // 既に消えている
+        }
+        if (i + 1 < 5)
+        {
+            WCHAR ebuf[96];
+            wsprintfW(ebuf, L"Copy retry %d/5 (err=%lu): ", i + 2, err);
+            AppendLog(std::wstring(ebuf) + relativeName);
         }
         Sleep(500);
     }
@@ -603,6 +627,11 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
                          (CompareFileTime(&prev.mtime, &cur.mtime) == 0) &&
                          (cur.size >= 0);
             }
+            else
+            {
+                // 初めて見たファイル…アップロード中の可能性があるので一回待つ
+                AppendLog(L"Detected (waiting for upload to finish): " + name);
+            }
 
             if (stable)
             {
@@ -619,9 +648,14 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
         for (auto it = copied.begin(); it != copied.end(); )
         {
             if (current.find(*it) == current.end())
+            {
+                AppendLog(L"Removed from watch folder: " + *it);
                 it = copied.erase(it);
+            }
             else
+            {
                 ++it;
+            }
         }
 
         previous = std::move(current);
@@ -822,8 +856,13 @@ static bool BrowseForFolder(HWND hOwner, std::wstring& outPath)
 static void AppendLog(const std::wstring& msg)
 {
     if (!g_hMainWnd) return;
+    // 先頭に [HH:MM:SS] を付ける
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    WCHAR ts[16];
+    wsprintfW(ts, L"[%02u:%02u:%02u] ", st.wHour, st.wMinute, st.wSecond);
     // ワーカースレッドからも呼ばれるため、メッセージで UI スレッドに渡す
-    std::wstring* p = new std::wstring(msg);
+    std::wstring* p = new std::wstring(std::wstring(ts) + msg);
     if (!PostMessageW(g_hMainWnd, WM_APP_LOG, (WPARAM)p, 0))
     {
         delete p;
