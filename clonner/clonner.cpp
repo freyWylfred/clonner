@@ -9,6 +9,7 @@
 #include <vector>
 #include <set>
 #include <algorithm>
+#include <random>
 #pragma comment(lib, "Shlwapi.lib")
 #pragma comment(lib, "Shell32.lib")
 
@@ -37,7 +38,9 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // メイン ウィンドウ ク
 static std::wstring g_watchFolder = L"C:\\WatchSource";
 static std::wstring g_destFolder  = L"C:\\WatchDest";
 static std::wstring g_targetExt   = L".txt";
-static DWORD        g_intervalMs  = 2000; // 監視間隔（ミリ秒）
+// 監視間隔はランダム化（毎回 [g_intervalMinMs, g_intervalMaxMs] の範囲）
+static DWORD        g_intervalMinMs = 1000; // 下限 1 秒（固定）
+static DWORD        g_intervalMaxMs = 2000; // 上限（UI から書き換えられる）
 
 // フォルダ監視用
 static HANDLE g_hWatchThread = nullptr;
@@ -212,12 +215,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     if (!g_targetExt.empty() && g_targetExt[0] != L'.')
                         g_targetExt = L"." + g_targetExt;
 
-                    // 監視間隔（秒）取得
+                    // 監視間隔（秒・最大値）取得
                     BOOL trans = FALSE;
                     UINT sec = GetDlgItemInt(hWnd, IDC_EDIT_INTERVAL, &trans, FALSE);
                     if (!trans || sec == 0) sec = 2;
                     if (sec > 3600) sec = 3600; // 上限 1 時間
-                    g_intervalMs = sec * 1000;
+                    g_intervalMaxMs = sec * 1000;
+                    if (g_intervalMaxMs < g_intervalMinMs)
+                        g_intervalMaxMs = g_intervalMinMs;
 
                     if (g_watchFolder.empty() || g_destFolder.empty())
                     {
@@ -236,7 +241,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_W), FALSE);
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_D), FALSE);
                         WCHAR info[256];
-                        wsprintfW(info, L"Watching started (interval %u s): ", (g_intervalMs / 1000));
+                        wsprintfW(info, L"Watching started (random interval %u-%u s): ",
+                                  (g_intervalMinMs / 1000), (g_intervalMaxMs / 1000));
                         AppendLog(std::wstring(info) + g_watchFolder +
                                   L"  ->  " + g_destFolder +
                                   L"  (" + g_targetExt + L")");
@@ -326,9 +332,12 @@ static bool StartWatching()
     // 既に動作中なら何もしない
     if (g_hWatchThread) return true;
 
-    // 監視元・コピー先フォルダが無ければ作成
-    CreateDirectoryW(g_watchFolder.c_str(), nullptr);
-    CreateDirectoryW(g_destFolder.c_str(), nullptr);
+    // 監視元・コピー先フォルダが無ければ作成（UNC パスの場合は自動作成しない）
+    auto isUncPath = [](const std::wstring& p) {
+        return p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\';
+    };
+    if (!isUncPath(g_watchFolder)) CreateDirectoryW(g_watchFolder.c_str(), nullptr);
+    if (!isUncPath(g_destFolder))  CreateDirectoryW(g_destFolder.c_str(),  nullptr);
 
     // 監視元フォルダの存在確認
     DWORD attr = GetFileAttributesW(g_watchFolder.c_str());
@@ -489,10 +498,20 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
     // （以降に「増えた」ファイルだけをコピー対象とする）
     EnumerateTargetFiles(g_watchFolder, L"", known);
 
+    // ランダム間隔用の乱数生成器
+    std::mt19937 rng(static_cast<unsigned>(GetTickCount64()) ^ GetCurrentThreadId());
+
     while (true)
     {
-        // 停止イベントを待ちつつ指定間隔だけスリープ
-        DWORD wait = WaitForSingleObject(g_hStopEvent, g_intervalMs);
+        // [g_intervalMinMs, g_intervalMaxMs] の範囲でランダムに次回間隔を決定
+        DWORD lo = g_intervalMinMs;
+        DWORD hi = g_intervalMaxMs;
+        if (hi < lo) hi = lo;
+        std::uniform_int_distribution<DWORD> dist(lo, hi);
+        DWORD waitMs = dist(rng);
+
+        // 停止イベントを待ちつつランダム間隔だけスリープ
+        DWORD wait = WaitForSingleObject(g_hStopEvent, waitMs);
         if (wait == WAIT_OBJECT_0)
         {
             // 停止要求
@@ -550,11 +569,11 @@ static void CreateChildControls(HWND hWnd)
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                     0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_EXT, hi, nullptr);
 
-    CreateWindowW(L"STATIC", L"Interval (sec):", WS_CHILD | WS_VISIBLE,
+    CreateWindowW(L"STATIC", L"Max interval (sec):", WS_CHILD | WS_VISIBLE,
                   0, 0, 0, 0, hWnd, (HMENU)IDC_STATIC, hi, nullptr);
     {
         WCHAR initInterval[16];
-        wsprintfW(initInterval, L"%u", (unsigned)(g_intervalMs / 1000));
+        wsprintfW(initInterval, L"%u", (unsigned)(g_intervalMaxMs / 1000));
         CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", initInterval,
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER | ES_RIGHT,
                         0, 0, 0, 0, hWnd, (HMENU)IDC_EDIT_INTERVAL, hi, nullptr);
@@ -647,12 +666,12 @@ static void LayoutChildControls(HWND hWnd)
     placeLabel(L"Extension:", pad, y + 3, labelW, rowH);
     place(IDC_EDIT_EXT, pad + labelW, y, 120, editH);
 
-    // 監視間隔（秒） … 同じ行の右側
+    // 監視間隔（秒・最大値） … 同じ行の右側。実際の待機は 1 秒〜この値の乱数。
     {
-        const int intLabelW = 90;
+        const int intLabelW = 120;
         const int intEditW  = 70;
         int x = pad + labelW + 120 + pad * 2;
-        placeLabel(L"Interval (sec):", x, y + 3, intLabelW, rowH);
+        placeLabel(L"Max interval (sec):", x, y + 3, intLabelW, rowH);
         place(IDC_EDIT_INTERVAL, x + intLabelW, y, intEditW, editH);
     }
     y += rowH + pad / 2;

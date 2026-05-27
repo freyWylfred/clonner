@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="clonner/clonner.vcxproj" />
+  <Project Path="clonner/clonner.vcxproj" Id="98502a0a-a96a-4c1e-b2cd-34e763a8b0fa" />
 </Solution>

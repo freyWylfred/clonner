@@ -5,13 +5,14 @@ A lightweight Windows folder watcher that automatically copies newly added files
 ## Features
 
 - Watches a source folder (recursively, including sub-folders) for new files
+- Works with both local paths (e.g. `C:\WatchSource`) and UNC paths to shared folders (e.g. `\\server\share\folder`)
 - Copies only files whose extension matches the one you specify
 - Preserves the relative sub-folder structure under the destination
 - Configurable from the GUI:
-  - Watch folder
-  - Destination folder
+  - Watch folder (local or UNC)
+  - Destination folder (local or UNC)
   - Target extension (e.g. `.txt`, `.log`)
-  - Polling interval (seconds, 1–3600)
+  - Maximum polling interval (seconds, 1–3600) — the actual wait between scans is randomized in the range `[1 s, max]`
 - Simple log panel showing copy results
 - Browse buttons for picking folders via the standard Windows shell dialog
 - Robust copying with retry (useful when files are still being written)
@@ -39,7 +40,7 @@ The resulting binary is `clonner\x64\Release\clonner.exe`.
 2. Set **Watch folder** — the folder to monitor.
 3. Set **Destination folder** — where matching files will be copied.
 4. Set **Extension** — for example `.txt` (the leading dot is optional).
-5. Set **Interval (sec)** — how often the watch folder is scanned.
+5. Set **Max interval (sec)** — the upper bound of the polling interval. Each scan waits a random number of milliseconds between 1 s and this value.
 6. Click **Start**. The log panel will show copies as they happen.
 7. Click **Stop** to end monitoring.
 
@@ -47,6 +48,7 @@ Notes:
 
 - Files that already exist in the watch folder when monitoring starts are treated as "known" and are **not** copied. Only files added afterwards are copied.
 - If a file with the same name already exists at the destination it will be overwritten.
+- UNC paths such as `\\server\share\folder` are supported for both watch and destination. The current user must have read access to the source and write access to the destination.
 
 ## Releases
 
