@@ -192,28 +192,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 break;
             case IDC_BTN_BROWSE_W:
                 {
-                    std::wstring p;
+                    // 現在の入力値を初期選択に使う
+                    WCHAR cur[MAX_PATH] = {};
+                    GetDlgItemTextW(hWnd, IDC_EDIT_WATCH, cur, MAX_PATH);
+                    std::wstring p = cur;
                     if (BrowseForFolder(hWnd, p))
                         SetDlgItemTextW(hWnd, IDC_EDIT_WATCH, p.c_str());
                 }
                 break;
             case IDC_BTN_BROWSE_D:
                 {
-                    std::wstring p;
+                    WCHAR cur[MAX_PATH] = {};
+                    GetDlgItemTextW(hWnd, IDC_EDIT_DEST, cur, MAX_PATH);
+                    std::wstring p = cur;
                     if (BrowseForFolder(hWnd, p))
                         SetDlgItemTextW(hWnd, IDC_EDIT_DEST, p.c_str());
                 }
                 break;
             case IDC_BTN_START:
                 {
-                    WCHAR buf[MAX_PATH] = {};
-                    GetDlgItemTextW(hWnd, IDC_EDIT_WATCH, buf, MAX_PATH);
-                    g_watchFolder = buf;
-                    GetDlgItemTextW(hWnd, IDC_EDIT_DEST, buf, MAX_PATH);
-                    g_destFolder = buf;
-                    WCHAR ext[256] = {};
-                    GetDlgItemTextW(hWnd, IDC_EDIT_EXT, ext, 256);
-                    g_targetExt = ext;
+                    // すでに動作中だったら何もしない
+                    if (g_hWatchThread)
+                        break;
+                    // 長いパスも取れるよう動的バッファを使用
+                    auto getDlgText = [&](int id) -> std::wstring {
+                        int len = GetWindowTextLengthW(GetDlgItem(hWnd, id));
+                        if (len <= 0) return std::wstring();
+                        std::vector<WCHAR> tmp(len + 1, L'\0');
+                        GetDlgItemTextW(hWnd, id, tmp.data(), len + 1);
+                        return std::wstring(tmp.data());
+                    };
+                    try
+                    {
+                        g_watchFolder = getDlgText(IDC_EDIT_WATCH);
+                        g_destFolder  = getDlgText(IDC_EDIT_DEST);
+                        g_targetExt   = getDlgText(IDC_EDIT_EXT);
                     // "*.pdf,*.xlsx" / ".pdf;xlsx" / "pdf xlsx" などをパースして「.xxx」形式の一覧にする
                     g_targetExtList.clear();
                     {
@@ -244,6 +257,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     {
                         // フォールバック：入力が空だったら .txt を使う
                         g_targetExtList.push_back(L".txt");
+                        AppendLog(L"Note: Extensions field was empty, defaulting to *.txt");
                     }
 
                     // 監視間隔（秒・最大値）取得
@@ -254,6 +268,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     g_intervalMaxMs = sec * 1000;
                     if (g_intervalMaxMs < g_intervalMinMs)
                         g_intervalMaxMs = g_intervalMinMs;
+                    }
+                    catch (const std::exception&)
+                    {
+                        MessageBoxW(hWnd, L"Failed to read input fields (out of memory?).",
+                                    L"clonner", MB_OK | MB_ICONERROR);
+                        break;
+                    }
 
                     if (g_watchFolder.empty() || g_destFolder.empty())
                     {
@@ -402,22 +423,22 @@ static void StopWatching()
     {
         SetEvent(g_hStopEvent);
     }
-    bool threadStillRunning = false;
     if (g_hWatchThread)
     {
         DWORD wr = WaitForSingleObject(g_hWatchThread, 5000);
-        if (wr == WAIT_OBJECT_0)
+        if (wr != WAIT_OBJECT_0)
         {
-            CloseHandle(g_hWatchThread);
+            // 想定外: スレッドが終了しない。ハンドルを閉じずリークさせるより、
+            // それ以上の不整合を避けるためそのまま進む。
+            // ただし同じスレッドに二重に Wait しないようポインタをクリアする。
+            // （スレッドハンドルのリークは余りのスレッドコンテキストと一緒にプロセス終了時に回収される）
             g_hWatchThread = nullptr;
+            return;
         }
-        else
-        {
-            // 想定外: スレッドが終了しない。ハンドルを閉じない（リーク）でも UAF を避ける。
-            threadStillRunning = true;
-        }
+        CloseHandle(g_hWatchThread);
+        g_hWatchThread = nullptr;
     }
-    if (g_hStopEvent && !threadStillRunning)
+    if (g_hStopEvent)
     {
         CloseHandle(g_hStopEvent);
         g_hStopEvent = nullptr;
@@ -572,93 +593,123 @@ static void EnumerateTargetFiles(const std::wstring& dir,
 
 static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
 {
-    using MetaMap = std::map<std::wstring, FileMeta, CIStringLess>;
-
-    // 前回スキャン時のメタデータと、すでにコピー済みの一覧
-    MetaMap previous;
-    std::set<std::wstring, CIStringLess> copied;
-
-    // 起動直後に存在していたファイルは「コピー済み」扱いとし、
-    // 以降に「増えた」ファイルだけをコピー対象とする
-    EnumerateTargetFiles(g_watchFolder, L"", previous);
-    for (const auto& kv : previous) copied.insert(kv.first);
-
-    // ランダム間隔用の乱数生成器
-    std::mt19937 rng(static_cast<unsigned>(GetTickCount64()) ^ GetCurrentThreadId());
-
-    while (true)
+    // スレッド全体を例外ガードして、万一の std::bad_alloc などでプロセスそのものが落ちるのを防ぐ
+    try
     {
-        // [g_intervalMinMs, g_intervalMaxMs] の範囲でランダムに次回間隔を決定
-        DWORD lo = g_intervalMinMs;
-        DWORD hi = g_intervalMaxMs;
-        if (hi < lo) hi = lo;
-        std::uniform_int_distribution<DWORD> dist(lo, hi);
-        DWORD waitMs = dist(rng);
+        using MetaMap = std::map<std::wstring, FileMeta, CIStringLess>;
 
-        // 停止イベントを待ちつつランダム間隔だけスリープ
-        DWORD wait = WaitForSingleObject(g_hStopEvent, waitMs);
-        if (wait == WAIT_OBJECT_0)
+        // 前回スキャン時のメタデータと、すでにコピー済みの一覧
+        MetaMap previous;
+        std::set<std::wstring, CIStringLess> copied;
+
+        // 起動直後に存在していたファイルは「コピー済み」扱いとし、
+        // 以降に「増えた」ファイルだけをコピー対象とする
+        EnumerateTargetFiles(g_watchFolder, L"", previous);
+        for (const auto& kv : previous) copied.insert(kv.first);
+
+        // ランダム間隔用の乱数生成器
+        std::mt19937 rng(static_cast<unsigned>(GetTickCount64()) ^ GetCurrentThreadId());
+
+        while (true)
         {
-            break;
-        }
-        if (wait != WAIT_TIMEOUT)
-        {
-            break;
-        }
+            // [g_intervalMinMs, g_intervalMaxMs] の範囲でランダムに次回間隔を決定
+            DWORD lo = g_intervalMinMs;
+            DWORD hi = g_intervalMaxMs;
+            if (hi < lo) hi = lo;
+            std::uniform_int_distribution<DWORD> dist(lo, hi);
+            DWORD waitMs = dist(rng);
 
-        MetaMap current;
-        EnumerateTargetFiles(g_watchFolder, L"", current);
-
-        // 未コピーのファイルについてのみ処理。
-        // 「前回とサイズ+更新時刻が同じ」ときだけ「書き込みが落ち着いた」と見なしコピーする。
-        // （アップロード中に検出されたファイルは、次のスキャンで同一メタデータになってからコピーされる）
-        for (const auto& kv : current)
-        {
-            const std::wstring& name = kv.first;
-            const FileMeta& cur = kv.second;
-            if (copied.find(name) != copied.end()) continue;
-
-            auto it = previous.find(name);
-            bool stable = false;
-            if (it != previous.end())
+            // 停止イベントを待ちつつランダム間隔だけスリープ
+            DWORD wait = WaitForSingleObject(g_hStopEvent, waitMs);
+            if (wait == WAIT_OBJECT_0)
             {
-                const FileMeta& prev = it->second;
-                stable = (prev.size == cur.size) &&
-                         (CompareFileTime(&prev.mtime, &cur.mtime) == 0) &&
-                         (cur.size >= 0);
+                break;
             }
-            else
+            if (wait != WAIT_TIMEOUT)
             {
-                // 初めて見たファイル…アップロード中の可能性があるので一回待つ
-                AppendLog(L"Detected (waiting for upload to finish): " + name);
+                break;
             }
 
-            if (stable)
+            MetaMap current;
+            try
             {
-                if (CopyOneFile(name))
+                EnumerateTargetFiles(g_watchFolder, L"", current);
+            }
+            catch (const std::exception&)
+            {
+                AppendLog(L"Scan failed (will retry next interval).");
+                continue;
+            }
+
+            // 未コピーのファイルについてのみ処理。
+            // 「前回とサイズ+更新時刻が同じ」ときだけ「書き込みが落ち着いた」と見なしコピーする。
+            // （アップロード中に検出されたファイルは、次のスキャンで同一メタデータになってからコピーされる）
+            for (const auto& kv : current)
+            {
+                const std::wstring& name = kv.first;
+                const FileMeta& cur = kv.second;
+                if (copied.find(name) != copied.end()) continue;
+
+                auto it = previous.find(name);
+                bool stable = false;
+                if (it != previous.end())
                 {
-                    copied.insert(name);
+                    const FileMeta& prev = it->second;
+                    stable = (prev.size == cur.size) &&
+                             (CompareFileTime(&prev.mtime, &cur.mtime) == 0) &&
+                             (cur.size >= 0);
                 }
-                // 失敗した場合は copied に入れないので、次回以降も再試行される
-            }
-        }
+                else
+                {
+                    // 初めて見たファイル…アップロード中の可能性があるので一回待つ
+                    AppendLog(L"Detected (waiting for upload to finish): " + name);
+                }
 
-        // 監視元から消えたファイルは「コピー済み」からも除く
-        // （同名ファイルが再びアップロードされたときにコピーされるようにする）
-        for (auto it = copied.begin(); it != copied.end(); )
-        {
-            if (current.find(*it) == current.end())
-            {
-                AppendLog(L"Removed from watch folder: " + *it);
-                it = copied.erase(it);
+                if (stable)
+                {
+                    bool ok = false;
+                    try
+                    {
+                        ok = CopyOneFile(name);
+                    }
+                    catch (const std::exception&)
+                    {
+                        AppendLog(L"Unexpected error while copying: " + name);
+                        ok = false;
+                    }
+                    if (ok)
+                    {
+                        copied.insert(name);
+                    }
+                    // 失敗した場合は copied に入れないので、次回以降も再試行される
+                }
             }
-            else
-            {
-                ++it;
-            }
-        }
 
-        previous = std::move(current);
+            // 監視元から消えたファイルは「コピー済み」からも除く
+            // （同名ファイルが再びアップロードされたときにコピーされるようにする）
+            for (auto it = copied.begin(); it != copied.end(); )
+            {
+                if (current.find(*it) == current.end())
+                {
+                    AppendLog(L"Removed from watch folder: " + *it);
+                    it = copied.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+
+            previous = std::move(current);
+        }
+    }
+    catch (const std::exception&)
+    {
+        AppendLog(L"Watch thread terminated due to an unexpected error.");
+    }
+    catch (...)
+    {
+        AppendLog(L"Watch thread terminated due to an unknown error.");
     }
 
     return 0;
@@ -861,8 +912,21 @@ static void AppendLog(const std::wstring& msg)
     GetLocalTime(&st);
     WCHAR ts[16];
     wsprintfW(ts, L"[%02u:%02u:%02u] ", st.wHour, st.wMinute, st.wSecond);
-    // ワーカースレッドからも呼ばれるため、メッセージで UI スレッドに渡す
-    std::wstring* p = new std::wstring(std::wstring(ts) + msg);
+    // ワーカースレッドからも呼ばれるため、メッセージで UI スレッドに渡す。
+    // ログ出力はオプショナルに応じて黙って落としてもアプリは続行させる。
+    std::wstring* p = new (std::nothrow) std::wstring();
+    if (!p) return;
+    try
+    {
+        p->reserve(msg.size() + 16);
+        p->assign(ts);
+        p->append(msg);
+    }
+    catch (...)
+    {
+        delete p;
+        return;
+    }
     if (!PostMessageW(g_hMainWnd, WM_APP_LOG, (WPARAM)p, 0))
     {
         delete p;
