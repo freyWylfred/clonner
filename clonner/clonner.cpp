@@ -198,19 +198,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 break;
             case IDC_BTN_BROWSE_W:
                 {
-                    // 現在の入力値を初期選択に使う
-                    WCHAR cur[MAX_PATH] = {};
-                    GetDlgItemTextW(hWnd, IDC_EDIT_WATCH, cur, MAX_PATH);
-                    std::wstring p = cur;
+                    // 現在の入力値を初期選択に使う（長いパスも全て取れるよう動的バッファ）
+                    int len = GetWindowTextLengthW(GetDlgItem(hWnd, IDC_EDIT_WATCH));
+                    std::vector<WCHAR> tmp((size_t)(len > 0 ? len : 0) + 1, L'\0');
+                    if (len > 0) GetDlgItemTextW(hWnd, IDC_EDIT_WATCH, tmp.data(), len + 1);
+                    std::wstring p = tmp.data();
                     if (BrowseForFolder(hWnd, p))
                         SetDlgItemTextW(hWnd, IDC_EDIT_WATCH, p.c_str());
                 }
                 break;
             case IDC_BTN_BROWSE_D:
                 {
-                    WCHAR cur[MAX_PATH] = {};
-                    GetDlgItemTextW(hWnd, IDC_EDIT_DEST, cur, MAX_PATH);
-                    std::wstring p = cur;
+                    int len = GetWindowTextLengthW(GetDlgItem(hWnd, IDC_EDIT_DEST));
+                    std::vector<WCHAR> tmp((size_t)(len > 0 ? len : 0) + 1, L'\0');
+                    if (len > 0) GetDlgItemTextW(hWnd, IDC_EDIT_DEST, tmp.data(), len + 1);
+                    std::wstring p = tmp.data();
                     if (BrowseForFolder(hWnd, p))
                         SetDlgItemTextW(hWnd, IDC_EDIT_DEST, p.c_str());
                 }
@@ -1011,6 +1013,24 @@ static void LoadConfig()
 static void SaveConfig()
 {
     std::wstring ini = GetConfigPath();
+
+    // WritePrivateProfileStringW は、ファイルが既に Unicode (UTF-16 LE BOM) だと
+    // Unicode で書き込み、そうでないと ANSI で書いてしまう。
+    // 初回作成時に BOM だけ付けて Unicode ファイルとして描画させる。
+    DWORD attr = GetFileAttributesW(ini.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+        HANDLE hf = CreateFileW(ini.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf != INVALID_HANDLE_VALUE)
+        {
+            const unsigned char bom[2] = { 0xFF, 0xFE };
+            DWORD written = 0;
+            WriteFile(hf, bom, sizeof(bom), &written, nullptr);
+            CloseHandle(hf);
+        }
+    }
+
     WritePrivateProfileStringW(L"Settings", L"WatchFolder",       g_watchFolder.c_str(), ini.c_str());
     WritePrivateProfileStringW(L"Settings", L"DestinationFolder", g_destFolder.c_str(),  ini.c_str());
     WritePrivateProfileStringW(L"Settings", L"Extensions",        g_targetExt.c_str(),   ini.c_str());
