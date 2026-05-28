@@ -293,7 +293,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_W), FALSE);
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_BROWSE_D), FALSE);
                         WCHAR info[256];
-                        wsprintfW(info, L"Watching started (random interval %u-%u s): ",
+                        wsprintfW(info, L"Watching started (recursive, random interval %u-%u s): ",
                                   (g_intervalMinMs / 1000), (g_intervalMaxMs / 1000));
                         // 拡張子一覧をカンマ区切りで表示
                         std::wstring extJoined;
@@ -547,10 +547,20 @@ struct FileMeta
     FILETIME mtime = {};
 };
 
+// 再帰探索の深さ上限（暴走防止）
+static const int kMaxRecursionDepth = 64;
+
 static void EnumerateTargetFiles(const std::wstring& dir,
                                  const std::wstring& relBase,
-                                 std::map<std::wstring, FileMeta, CIStringLess>& out)
+                                 std::map<std::wstring, FileMeta, CIStringLess>& out,
+                                 int depth = 0)
 {
+    if (depth > kMaxRecursionDepth)
+    {
+        AppendLog(L"Recursion depth limit reached, skipping: " + dir);
+        return;
+    }
+
     std::wstring pattern = dir;
     if (!pattern.empty() && pattern.back() != L'\\') pattern += L'\\';
     pattern += L"*";
@@ -558,7 +568,18 @@ static void EnumerateTargetFiles(const std::wstring& dir,
     WIN32_FIND_DATAW fd = {};
     HANDLE h = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd,
                                 FindExSearchNameMatch, nullptr, 0);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        DWORD err = GetLastError();
+        if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND && err != ERROR_NO_MORE_FILES)
+        {
+            // アクセス拒否などはサブフォルダ単位でログに残しつつ続行
+            WCHAR ebuf[96];
+            wsprintfW(ebuf, L"Cannot enumerate (err=%lu): ", err);
+            AppendLog(std::wstring(ebuf) + dir);
+        }
+        return;
+    }
 
     do
     {
@@ -571,10 +592,14 @@ static void EnumerateTargetFiles(const std::wstring& dir,
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
         {
+            // シンボリックリンク/ジャンクションは辿らない（無限ループ防止）
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                continue;
+
             std::wstring sub = dir;
             if (!sub.empty() && sub.back() != L'\\') sub += L'\\';
             sub += fd.cFileName;
-            EnumerateTargetFiles(sub, rel, out);
+            EnumerateTargetFiles(sub, rel, out, depth + 1);
         }
         else
         {
