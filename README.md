@@ -17,6 +17,7 @@ A lightweight Windows folder watcher that automatically copies newly added files
 - Browse buttons for picking folders via the standard Windows shell dialog
 - Robust copying with retry (useful when files are still being written)
 - Clean start/stop control with a background worker thread
+- Settings (watch folder, destination folder, extensions, max interval) are persisted to `config.ini` next to the executable and reloaded on startup
 
 ## Requirements
 
@@ -49,6 +50,7 @@ Notes:
 - Files that already exist in the watch folder when monitoring starts are treated as "known" and are **not** copied. Only files added afterwards are copied.
 - If a file with the same name already exists at the destination it will be overwritten.
 - UNC paths such as `\\server\share\folder` are supported for both watch and destination. The current user must have read access to the source and write access to the destination.
+- Settings are saved to `config.ini` (in the same folder as `clonner.exe`) when **Start** is pressed, and loaded automatically on the next launch. The file uses the standard INI format with a `[Settings]` section and keys `WatchFolder`, `DestinationFolder`, `Extensions`, and `MaxIntervalSec`.
 
 ## Releases
 

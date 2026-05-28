@@ -62,6 +62,9 @@ static void         CreateChildControls(HWND hWnd);
 static void         LayoutChildControls(HWND hWnd);
 static bool         BrowseForFolder(HWND hOwner, std::wstring& outPath);
 static void         AppendLog(const std::wstring& msg);
+static std::wstring GetConfigPath();
+static void         LoadConfig();
+static void         SaveConfig();
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -72,6 +75,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(lpCmdLine);
 
     // TODO: ここにコードを挿入してください。
+
+    // 設定を config.ini から読み込む（ウィンドウ作成前に行う）
+    LoadConfig();
 
     // グローバル文字列を初期化する
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -284,6 +290,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     }
                     if (StartWatching())
                     {
+                        // 起動に成功した設定を config.ini に保存
+                        SaveConfig();
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_START), FALSE);
                         EnableWindow(GetDlgItem(hWnd, IDC_BTN_STOP),  TRUE);
                         EnableWindow(GetDlgItem(hWnd, IDC_EDIT_WATCH), FALSE);
@@ -956,4 +964,57 @@ static void AppendLog(const std::wstring& msg)
     {
         delete p;
     }
+}
+
+//
+// config.ini の読み書き（exe と同じフォルダの config.ini）
+//
+static std::wstring GetConfigPath()
+{
+    WCHAR mod[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameW(nullptr, mod, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return L"config.ini";
+    // ファイル名部分を除去して config.ini を連結
+    WCHAR* p = wcsrchr(mod, L'\\');
+    if (p) *(p + 1) = L'\0';
+    std::wstring path = mod;
+    path += L"config.ini";
+    return path;
+}
+
+static void LoadConfig()
+{
+    std::wstring ini = GetConfigPath();
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return; // 初回起動などファイルが無いならデフォルトのまま
+
+    auto readStr = [&](const wchar_t* key, const std::wstring& def) -> std::wstring {
+        std::vector<WCHAR> buf(2048, L'\0');
+        DWORD got = GetPrivateProfileStringW(L"Settings", key, def.c_str(),
+                                             buf.data(), (DWORD)buf.size(), ini.c_str());
+        return std::wstring(buf.data(), got);
+    };
+
+    g_watchFolder = readStr(L"WatchFolder",      g_watchFolder);
+    g_destFolder  = readStr(L"DestinationFolder", g_destFolder);
+    g_targetExt   = readStr(L"Extensions",       g_targetExt);
+
+    UINT sec = GetPrivateProfileIntW(L"Settings", L"MaxIntervalSec",
+                                     (int)(g_intervalMaxMs / 1000), ini.c_str());
+    if (sec == 0) sec = 2;
+    if (sec > 3600) sec = 3600;
+    g_intervalMaxMs = sec * 1000;
+    if (g_intervalMaxMs < g_intervalMinMs)
+        g_intervalMaxMs = g_intervalMinMs;
+}
+
+static void SaveConfig()
+{
+    std::wstring ini = GetConfigPath();
+    WritePrivateProfileStringW(L"Settings", L"WatchFolder",       g_watchFolder.c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Settings", L"DestinationFolder", g_destFolder.c_str(),  ini.c_str());
+    WritePrivateProfileStringW(L"Settings", L"Extensions",        g_targetExt.c_str(),   ini.c_str());
+    WCHAR num[16];
+    wsprintfW(num, L"%u", (unsigned)(g_intervalMaxMs / 1000));
+    WritePrivateProfileStringW(L"Settings", L"MaxIntervalSec", num, ini.c_str());
 }
