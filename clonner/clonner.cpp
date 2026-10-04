@@ -65,6 +65,10 @@ static void         AppendLog(const std::wstring& msg);
 static std::wstring GetConfigPath();
 static void         LoadConfig();
 static void         SaveConfig();
+static std::wstring NormalizeFolderPath(std::wstring p);
+
+// 全ファイルを対象にするか（Extensions に "*" / "*.*" / "all" を指定した場合）
+static bool g_matchAllFiles = false;
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -232,11 +236,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     };
                     try
                     {
-                        g_watchFolder = getDlgText(IDC_EDIT_WATCH);
-                        g_destFolder  = getDlgText(IDC_EDIT_DEST);
+                        g_watchFolder = NormalizeFolderPath(getDlgText(IDC_EDIT_WATCH));
+                        g_destFolder  = NormalizeFolderPath(getDlgText(IDC_EDIT_DEST));
                         g_targetExt   = getDlgText(IDC_EDIT_EXT);
                     // "*.pdf,*.xlsx" / ".pdf;xlsx" / "pdf xlsx" などをパースして「.xxx」形式の一覧にする
+                    // "*" / "*.*" / "all" が含まれていれば全ファイル対象
                     g_targetExtList.clear();
+                    g_matchAllFiles = false;
                     {
                         std::wstring token;
                         auto flush = [&]() {
@@ -245,7 +251,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                             while (b < e && (token[b] == L' ' || token[b] == L'\t' || token[b] == L'*')) ++b;
                             while (e > b && (token[e-1] == L' ' || token[e-1] == L'\t')) --e;
                             std::wstring t = token.substr(b, e - b);
-                            if (!t.empty())
+                            // "*" / "*.*" / ".*" / "all" → 全ファイル
+                            if (token.find_first_not_of(L" \t") != std::wstring::npos &&
+                                (t.empty() || t == L"." || t == L".*" || t == L"*" ||
+                                 _wcsicmp(t.c_str(), L"all") == 0))
+                            {
+                                g_matchAllFiles = true;
+                            }
+                            else if (!t.empty())
                             {
                                 if (t[0] != L'.') t = L"." + t;
                                 if (t.size() > 1) g_targetExtList.push_back(t);
@@ -261,11 +274,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         }
                         flush();
                     }
-                    if (g_targetExtList.empty())
+                    if (g_targetExtList.empty() && !g_matchAllFiles)
                     {
-                        // フォールバック：入力が空だったら .txt を使う
-                        g_targetExtList.push_back(L".txt");
-                        AppendLog(L"Note: Extensions field was empty, defaulting to *.txt");
+                        // フォールバック：入力が空だったら全ファイルを対象にする
+                        g_matchAllFiles = true;
+                        AppendLog(L"Note: Extensions field was empty, watching ALL files (*)");
                     }
 
                     // 監視間隔（秒・最大値）取得
@@ -307,11 +320,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                   (g_intervalMinMs / 1000), (g_intervalMaxMs / 1000));
                         // 拡張子一覧をカンマ区切りで表示
                         std::wstring extJoined;
-                        for (size_t i = 0; i < g_targetExtList.size(); ++i)
+                        if (g_matchAllFiles)
                         {
-                            if (i) extJoined += L", ";
-                            extJoined += L"*";
-                            extJoined += g_targetExtList[i];
+                            extJoined = L"* (all files)";
+                        }
+                        else
+                        {
+                            for (size_t i = 0; i < g_targetExtList.size(); ++i)
+                            {
+                                if (i) extJoined += L", ";
+                                extJoined += L"*";
+                                extJoined += g_targetExtList[i];
+                            }
                         }
                         AppendLog(std::wstring(info) + g_watchFolder +
                                   L"  ->  " + g_destFolder +
@@ -407,12 +427,45 @@ static bool StartWatching()
         return p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\';
     };
     if (!isUncPath(g_watchFolder)) CreateDirectoryW(g_watchFolder.c_str(), nullptr);
-    if (!isUncPath(g_destFolder))  CreateDirectoryW(g_destFolder.c_str(),  nullptr);
+    // コピー先は UNC でも（共有ルートでなければ）作成を試みる。失敗しても後続のチェックで判定する
+    CreateDirectoryW(g_destFolder.c_str(), nullptr);
 
-    // 監視元フォルダの存在確認
+    // 監視元フォルダの存在確認（失敗理由をログに残す）
     DWORD attr = GetFileAttributesW(g_watchFolder.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        WCHAR ebuf[128];
+        wsprintfW(ebuf, L"ERROR: Cannot access watch folder (err=%lu): ", GetLastError());
+        AppendLog(std::wstring(ebuf) + g_watchFolder);
         return false;
+    }
+
+    // コピー先フォルダの存在・書き込み確認
+    DWORD dattr = GetFileAttributesW(g_destFolder.c_str());
+    if (dattr == INVALID_FILE_ATTRIBUTES || !(dattr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        WCHAR ebuf[128];
+        wsprintfW(ebuf, L"ERROR: Cannot access destination folder (err=%lu): ", GetLastError());
+        AppendLog(std::wstring(ebuf) + g_destFolder);
+        return false;
+    }
+    {
+        std::wstring probe = g_destFolder;
+        if (probe.back() != L'\\') probe += L'\\';
+        probe += L".clonner_write_test.tmp";
+        HANDLE hp = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (hp == INVALID_HANDLE_VALUE)
+        {
+            WCHAR ebuf[128];
+            wsprintfW(ebuf, L"WARNING: Destination folder is not writable (err=%lu): ", GetLastError());
+            AppendLog(std::wstring(ebuf) + g_destFolder);
+        }
+        else
+        {
+            CloseHandle(hp);
+        }
+    }
 
     g_hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_hStopEvent) return false;
@@ -460,6 +513,7 @@ static void StopWatching()
 //
 static bool HasTargetExtension(const std::wstring& fileName)
 {
+    if (g_matchAllFiles) return true;
     const wchar_t* ext = ::PathFindExtensionW(fileName.c_str());
     if (!ext || !*ext) return false;
     for (const auto& e : g_targetExtList)
@@ -560,6 +614,10 @@ struct FileMeta
 // 再帰探索の深さ上限（暴走防止）
 static const int kMaxRecursionDepth = 64;
 
+// スキャン統計（監視スレッドからのみ更新）
+static unsigned g_scanFolderCount = 0;
+static unsigned g_scanErrorCount  = 0;
+
 static void EnumerateTargetFiles(const std::wstring& dir,
                                  const std::wstring& relBase,
                                  std::map<std::wstring, FileMeta, CIStringLess>& out,
@@ -581,12 +639,14 @@ static void EnumerateTargetFiles(const std::wstring& dir,
     if (h == INVALID_HANDLE_VALUE)
     {
         DWORD err = GetLastError();
-        if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND && err != ERROR_NO_MORE_FILES)
+        // 空フォルダは ERROR_FILE_NOT_FOUND を返すので無視。それ以外（アクセス拒否、ネットワーク断、
+        // パス不正など）はログに残す。監視ルート(depth 0)の失敗は必ずログに残す。
+        if (depth == 0 || (err != ERROR_FILE_NOT_FOUND && err != ERROR_NO_MORE_FILES))
         {
-            // アクセス拒否などはサブフォルダ単位でログに残しつつ続行
             WCHAR ebuf[96];
             wsprintfW(ebuf, L"Cannot enumerate (err=%lu): ", err);
             AppendLog(std::wstring(ebuf) + dir);
+            ++g_scanErrorCount;
         }
         return;
     }
@@ -602,9 +662,16 @@ static void EnumerateTargetFiles(const std::wstring& dir,
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
         {
-            // シンボリックリンク/ジャンクションは辿らない（無限ループ防止）
+            // シンボリックリンク/ジャンクションは辿らない（無限ループ防止）。
+            // ただし DFS リンクや NAS の重複排除など、それ以外の再解析ポイントは通常のフォルダとして扱う
+            // （\\domain\share\... のユーザーフォルダは DFS で reparse 属性が付くことが多い）
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-                continue;
+            {
+                if (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK ||
+                    fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT)
+                    continue;
+            }
+            ++g_scanFolderCount;
 
             std::wstring sub = dir;
             if (!sub.empty() && sub.back() != L'\\') sub += L'\\';
@@ -639,8 +706,24 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
 
         // 起動直後に存在していたファイルは「コピー済み」扱いとし、
         // 以降に「増えた」ファイルだけをコピー対象とする
+        g_scanFolderCount = 0;
+        g_scanErrorCount  = 0;
         EnumerateTargetFiles(g_watchFolder, L"", previous);
         for (const auto& kv : previous) copied.insert(kv.first);
+        {
+            WCHAR buf[160];
+            wsprintfW(buf, L"Initial scan: %u matching file(s) in %u sub-folder(s) found (existing files are NOT copied)",
+                      (unsigned)previous.size(), g_scanFolderCount);
+            AppendLog(buf);
+            if (g_scanErrorCount)
+            {
+                wsprintfW(buf, L"WARNING: %u folder(s) could not be read during initial scan - check permissions / network",
+                          g_scanErrorCount);
+                AppendLog(buf);
+            }
+        }
+        size_t lastSeenCount = previous.size();
+        unsigned scanNo = 0;
 
         // ランダム間隔用の乱数生成器
         std::mt19937 rng(static_cast<unsigned>(GetTickCount64()) ^ GetCurrentThreadId());
@@ -666,6 +749,8 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
             }
 
             MetaMap current;
+            g_scanFolderCount = 0;
+            g_scanErrorCount  = 0;
             try
             {
                 EnumerateTargetFiles(g_watchFolder, L"", current);
@@ -674,6 +759,16 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
             {
                 AppendLog(L"Scan failed (will retry next interval).");
                 continue;
+            }
+            ++scanNo;
+            // ファイル数が変わった時だけスキャン結果を記録（ログが溢れないように）
+            if (current.size() != lastSeenCount)
+            {
+                WCHAR buf[128];
+                wsprintfW(buf, L"Scan #%u: %u matching file(s) visible (was %u)",
+                          scanNo, (unsigned)current.size(), (unsigned)lastSeenCount);
+                AppendLog(buf);
+                lastSeenCount = current.size();
             }
 
             // 未コピーのファイルについてのみ処理。
@@ -718,6 +813,14 @@ static DWORD WINAPI WatchThreadProc(LPVOID /*lpParam*/)
                     }
                     // 失敗した場合は copied に入れないので、次回以降も再試行される
                 }
+            }
+
+            // スキャン中にエラーがあったフォルダがある場合、ネットワーク断の可能性があるので
+            // 「消えた」判定はスキップする（誤って copied から外して二重コピーしないため）
+            if (g_scanErrorCount)
+            {
+                previous = std::move(current);
+                continue;
             }
 
             // 監視元から消えたファイルは「コピー済み」からも除く
@@ -966,6 +1069,31 @@ static void AppendLog(const std::wstring& msg)
     {
         delete p;
     }
+}
+
+//
+// フォルダパスの正規化（前後の空白・引用符を除去、'/' → '\'、末尾の '\' を除去）
+//
+static std::wstring NormalizeFolderPath(std::wstring p)
+{
+    size_t b = 0, e = p.size();
+    while (b < e && (p[b] == L' ' || p[b] == L'\t' || p[b] == L'"' || p[b] == L'\r' || p[b] == L'\n')) ++b;
+    while (e > b && (p[e-1] == L' ' || p[e-1] == L'\t' || p[e-1] == L'"' || p[e-1] == L'\r' || p[e-1] == L'\n')) --e;
+    p = p.substr(b, e - b);
+    for (auto& ch : p) if (ch == L'/') ch = L'\\';
+    // 末尾の '\' を除去（"C:\" や "\\server\share\" のルートは残す）
+    while (p.size() > 3 && p.back() == L'\\')
+    {
+        if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\')
+        {
+            // UNC: \\server\share は最低 2 個の区切り（server と share）が必要
+            size_t seps = 0;
+            for (size_t i = 2; i + 1 < p.size(); ++i) if (p[i] == L'\\') ++seps;
+            if (seps < 2) break;
+        }
+        p.pop_back();
+    }
+    return p;
 }
 
 //

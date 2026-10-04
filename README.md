@@ -26,7 +26,7 @@ A lightweight Windows folder watcher that automatically copies newly added files
 
 - **Recursive watching** of a source folder, including all sub-folders. Sub-folder structure is preserved under the destination.
 - **Local and UNC paths** are both supported on each side, e.g. `C:\WatchSource` or `\\server\share\folder`.
-- **Multiple extensions** in one go, e.g. `*.pdf,*.xlsx` or `pdf;xlsx` (comma, semicolon, pipe, or whitespace separated; the leading `*` and `.` are optional). Matching is case-insensitive.
+- **Multiple extensions** in one go, e.g. `*.pdf,*.xlsx` or `pdf;xlsx` (comma, semicolon, pipe, or whitespace separated; the leading `*` and `.` are optional). Matching is case-insensitive. Use `*` (or leave the field empty) to copy **every** new file regardless of extension.
 - **Upload-safe copy detection.** A file is copied only after two consecutive scans report the same size and last-write time, so partially uploaded files are never copied prematurely.
 - **Automatic retry on failure.** If a copy fails (sharing violation, transient network error, etc.) the file is retried on the next scan instead of being silently skipped forever.
 - **Randomized polling interval.** Every scan picks a random wait between 1 s and the **Max interval** you configure.
@@ -124,6 +124,11 @@ Every line is prefixed with `[HH:MM:SS]`.
 | Message                                                                              | Meaning                                                                            |
 | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
 | `Watching started (recursive, random interval N-M s): SRC -> DST (*.ext1, *.ext2)`   | Successfully started monitoring with the displayed parameters.                     |
+| `Initial scan: N matching file(s) in M sub-folder(s) found (existing files are NOT copied)` | Baseline taken at Start. If `M` is 0 but you expect sub-folders, the share is not being read correctly. |
+| `WARNING: N folder(s) could not be read during initial scan` | Some sub-folders returned an error (permissions / network). |
+| `ERROR: Cannot access watch folder (err=N)` / `ERROR: Cannot access destination folder (err=N)` | Start aborted; the path does not exist or is not reachable. `err=5` = access denied, `err=53` = network path not found, `err=67` = share name not found, `err=1326` = bad credentials. |
+| `WARNING: Destination folder is not writable (err=N)` | Destination exists but a test file could not be created there. Copies will fail. |
+| `Scan #N: X matching file(s) visible (was Y)`                                      | The number of matching files changed since the last scan (proves the scan is seeing the share). |
 | `Detected (waiting for upload to finish): <file>`                                    | First sighting of a new file - `clonner` will confirm stability on the next scan.  |
 | `Copied: <file> (size) -> <full destination path>`                                   | File copied successfully.                                                          |
 | `Copy retry K/5 (err=N): <file>`                                                     | Transient error (commonly sharing violation). A retry is in progress.              |
@@ -140,9 +145,12 @@ Every line is prefixed with `[HH:MM:SS]`.
 ## FAQ / troubleshooting
 
 **Nothing happens when I drop a file into the watch folder.**
-- Make sure the extension matches one of the entries in *Extensions* (case-insensitive).
+- Look at the very first log lines after **Start**. `ERROR: Cannot access ...` means the path is wrong or you have no permission; `Initial scan: ... in 0 sub-folder(s)` on a share that has sub-folders means they are not readable.
+- Make sure the extension matches one of the entries in *Extensions* (case-insensitive). Enter `*` to copy every file.
 - Wait at least `2 x Max interval` seconds - stability is required across two scans.
-- Check the log for `Detected (waiting for upload to finish)` to confirm detection.
+- Check the log for `Scan #N: ... (was ...)` and `Detected (waiting for upload to finish)` to confirm detection.
+- On DFS / NAS shares (`\\domain\users\...`) folders may be exposed as reparse points. `clonner` follows them (only true symlinks and junctions are skipped).
+- If the share requires a different account, first open it in Explorer (or run `net use \\server\share /user:DOMAIN\name`) so Windows caches the credentials; `clonner` uses the current user's session.
 
 **The destination is on a UNC share but the Browse dialog will not let me pick it.**
 Type or paste the UNC path directly into the *Destination folder* field; the Browse dialog is optional.
@@ -170,7 +178,7 @@ In `config.ini` next to `clonner.exe`, created on first **Start**.
 ## Limitations
 
 - Polling design means a copy is detected within roughly `2 x Max interval` seconds, not instantaneously. Set Max interval to `1` for the fastest response.
-- Symbolic links and junctions inside the watch tree are intentionally **not** followed.
+- Symbolic links and junctions inside the watch tree are intentionally **not** followed (other reparse points such as DFS links and deduplicated folders are followed).
 - Recursion depth is capped at 64 levels.
 - File renames are seen as deletion of the old name plus addition of the new one.
 - `clonner` only **copies** - it does not propagate deletions, moves, or content changes back to the destination.
